@@ -3,18 +3,17 @@ import numpy as np
 from collections import deque
 from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
-from line_detector import LineDetector
+from line_detector import Line
+from extract_plate_number import extract_license_plate_number
 import time
 
-# Constants
-LICENSE_PLATE_OFFSET = 0.2  # 20% from car bottom
 
 class FrameBatchProcessor:
-    def __init__(self, batch_size=60):
+    def __init__(self, position, batch_size=60):
         self.batch_size = batch_size
         self.frames = []
         self.violation_data = []
-        self.line_detector = LineDetector(num_frames_avg=batch_size)
+        self.line = Line(position)
         self.current_stop_line_y = None
         self.yolo_model = YOLO("yolov8s.pt")
         self.tracker = DeepSort(max_age=30)
@@ -86,71 +85,20 @@ class FrameBatchProcessor:
         return 'unknown'
 
     def process_batch(self, frames):
-        """Process a batch of frames in two passes:
-        1. Detect average stop line
-        2. Detect traffic light, vehicles, and violations
+        """Process a batch of frames in one passes:
+        1. Detect traffic light, vehicles, and violations
         """
-
-
-        # Pass 1: Detect and average stop line
-        resized_frames = []
-        stop_line_coords = []
 
         resized_w, resized_h = 640, 480
 
+        # Pass: Detect vehicles, traffic light, and violations
         for frame in frames:
-            # Resize for processing
-            resized = cv2.resize(frame, (resized_w, resized_h))
-            resized_frames.append(resized)
+            resized_frame = frame.copy()
+            resized_frame = cv2.resize(resized_frame, (resized_w, resized_h))
 
-            # Detect line in resized frame
-            (x1, y1), (x2, y2), channel_indices = self.line_detector.detect_white_line(resized, color='red')
-
-            # Save line coordinates (in resized space)
-            stop_line_coords.append((y1, x1, x2))
-
-
-        # Final average stop line
-        if stop_line_coords:
-            ys, xs1, xs2 = zip(*stop_line_coords)
-            avg_y = int(np.mean(ys))
-            avg_x1 = int(np.mean(xs1))
-            avg_x2 = int(np.mean(xs2))
-
-            # Convert coordinates back to original frame scale
-            orig_h, orig_w = frames[-1].shape[:2]
-            scale_x = orig_w / resized_w
-            scale_y = orig_h / resized_h
-
-            orig_y = int(avg_y * scale_y)
-            orig_x1 = int(avg_x1 * scale_x)
-            orig_x2 = int(avg_x2 * scale_x)
-
-            # Draw on the original frame (last one used)
-            cv2.line(
-                frames[-1],  # or whichever original frame you want to draw on
-                (orig_x1, orig_y),
-                (orig_x2, orig_y),
-                (0, 255, 0), 2
-            )
-
-            # Save state if needed
-            self.current_stop_line_y = orig_y
-            self.current_stop_line_x1 = orig_x1
-            self.current_stop_line_x2 = orig_x2
-            stop_line_detected = True
-        else:
-            self.current_stop_line_y = None
-            self.current_stop_line_x1 = None
-            self.current_stop_line_x2 = None
-            stop_line_detected = False
-
-
-        # Pass 2: Detect vehicles, traffic light, and violations
-        for frame in resized_frames:
-            processed_frame = frame.copy()
+            processed_frame = resized_frame.copy()
             results = self.yolo_model(frame, verbose=False)[0]
-
+            processed_frame = self.line.draw_line(frame)
             detections = []
             traffic_lights = []
 
@@ -180,41 +128,60 @@ class FrameBatchProcessor:
                 if not track.is_confirmed():
                     continue
 
-                track_id = track.track_id
                 l, t, r, b = map(int, track.to_ltrb())
-                plate_y = b - int((b - t) * LICENSE_PLATE_OFFSET)
 
-                if track_id not in self.car_states:
-                    self.car_states[track_id] = {
-                        "has_passed": False,
-                        "initial_y": plate_y
-                    }
-                    continue
-
+                print(self.current_traffic_light_state == 'red')
+                print(self.line)
                 if (
                         self.current_traffic_light_state == 'red' and
-                        stop_line_detected and
-                        not self.car_states[track_id]["has_passed"] and
-                        self.car_states[track_id]["initial_y"] < self.current_stop_line_y <= plate_y and
-                        self.current_stop_line_x1 <= car_center_x <= self.current_stop_line_x2
+                        self.line and
+                        self.line.is_car_touch_line(l, t, r, processed_frame.shape)
                     ):
-                    
+                    violation_box = (l, t, r, b)
+                    car_crop = crop_car_from_frame(frame, violation_box) 
+                    license_plate_number = extract_license_plate_number(car_crop)
+
+                    if license_plate_number not in self.last_violations.keys():
+                        self.last_violations[license_plate_number] = license_plate_number
+                    else:
+                        continue
+
                     violation = {
-                        "track_id": track_id,
-                        "position": (l, t, r, b),
+                        "license_plate_number": license_plate_number,
                         "violation": "Red light violation",
                         "points": 10,
                     }
 
-                    self.car_states[track_id]["has_passed"] = True
-                    self.last_violations[track_id] = time.time()
 
                     cv2.rectangle(processed_frame, (l, t), (r, b), (0, 0, 255), 2)
-                    cv2.putText(processed_frame, f"VIOLATION (ID: {track_id})",
+                    cv2.putText(processed_frame, f"VIOLATION (ID: {license_plate_number})",
                                 (l, t - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
                     self.violation_data.append((violation, processed_frame))
 
-                car_center_x = (l + r) // 2
-                cv2.circle(processed_frame, (car_center_x, plate_y), 5, (255, 0, 0), -1)
 
+
+def crop_car_from_frame(frame, position, frame_resized_shape=(640, 480)):
+    l, t, r, b = position
+    resized_w, resized_h = frame_resized_shape
+    orig_h, orig_w = frame.shape[:2]
+
+    # Scale from resized to original
+    scale_x = orig_w / resized_w
+    scale_y = orig_h / resized_h
+
+    # Convert to original coordinates
+    orig_l = int(l * scale_x)
+    orig_t = int(t * scale_y)
+    orig_r = int(r * scale_x)
+    orig_b = int(b * scale_y)
+
+    # Ensure coordinates are within frame bounds
+    orig_l = max(0, orig_l)
+    orig_t = max(0, orig_t)
+    orig_r = min(orig_w, orig_r)
+    orig_b = min(orig_h, orig_b)
+
+    # Crop and return the car image
+    car_crop = frame[orig_t:orig_b, orig_l:orig_r].copy()
+    return car_crop
