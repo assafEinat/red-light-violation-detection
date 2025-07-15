@@ -17,7 +17,8 @@ server_ip = "127.0.0.1"
 server_port = 9999
 
 # Key variable
-AES_KEY = b"this_is_a_32_byte_super_secret_key!!"
+AES_KEY = b"this_is_a_super_secret_key_32!!!"
+
 
 def recv_exact(sock, length):
     """Ensure exactly 'length' bytes are read from the TCP stream"""
@@ -176,10 +177,18 @@ def start_gui():
 
     Button(root, text="Choose Video", command=choose_video, width=20).pack(pady=5)
 
-    choose_coords_button = Button(root, text="Choose Stop Line", command=choose_coordinates, state="disabled", width=20)
+    choose_coords_button = Button(root, 
+                                  text="Choose Stop Line", 
+                                  command=choose_coordinates, 
+                                  state="disabled", 
+                                  width=20)
     choose_coords_button.pack(pady=5)
 
-    start_button = Button(root, text="Start Streaming", command=lambda: threading.Thread(target=start_stream, args=(root,)).start(), state="disabled", width=20)
+    start_button = Button(root, text="Start Streaming",
+                           command=lambda: threading.Thread(target=start_stream,
+                                                             args=(root,)).start(), 
+                                                             state="disabled", 
+                                                             width=20)
     start_button.pack(pady=5)
 
     status_label = Label(root, text="No video selected.", fg="gray")

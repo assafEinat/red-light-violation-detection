@@ -1,11 +1,9 @@
 import cv2
 import numpy as np
-from collections import deque
 from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
-from line_detector import Line
-from extract_plate_number import extract_license_plate_number
-import time
+from line import Line
+from car import Car
 
 
 class FrameBatchProcessor:
@@ -45,43 +43,43 @@ class FrameBatchProcessor:
         roi = frame[y1:y2, x1:x2]
         if roi.size == 0:
             return 'unknown'
-        
+
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        
-        # Color ranges (HSV space)
+
+        # HSV color ranges
         lower_red1 = np.array([0, 150, 150])
         upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 150, 150])  # Red wraps around in HSV
+        lower_red2 = np.array([170, 150, 150])
         upper_red2 = np.array([180, 255, 255])
-        
+
         lower_yellow = np.array([20, 150, 150])
         upper_yellow = np.array([30, 255, 255])
-        
+
         lower_green = np.array([40, 50, 50])
         upper_green = np.array([90, 255, 255])
-        
+
         # Create masks
         red_mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
         red_mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
         red_mask = cv2.bitwise_or(red_mask1, red_mask2)
-        
         yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
         green_mask = cv2.inRange(hsv, lower_green, upper_green)
-        
-        # Count pixels
+
         red_pixels = cv2.countNonZero(red_mask)
         yellow_pixels = cv2.countNonZero(yellow_mask)
         green_pixels = cv2.countNonZero(green_mask)
-        
-        # Thresholds (adjust based on your needs)
-        threshold = 50  # Minimum bright pixels to consider
-        
-        if red_pixels > threshold:
+
+        threshold = 50
+        margin = 1.3  # ratio difference to be confident
+
+        # Pick the most dominant color if it's confidently stronger
+        if red_pixels > threshold and red_pixels > yellow_pixels * margin and red_pixels > green_pixels * margin:
             return 'red'
-        elif yellow_pixels > threshold:
+        elif yellow_pixels > threshold and yellow_pixels > red_pixels * margin and yellow_pixels > green_pixels * margin:
             return 'yellow'
-        elif green_pixels > threshold:
+        elif green_pixels > threshold and green_pixels > red_pixels * margin and green_pixels > yellow_pixels * margin:
             return 'green'
+
         return 'unknown'
 
     def process_batch(self, frames):
@@ -129,22 +127,17 @@ class FrameBatchProcessor:
                     continue
 
                 l, t, r, b = map(int, track.to_ltrb())
-
-                print(self.current_traffic_light_state == 'red')
-                print(self.line)
+                cv2.line(processed_frame, (l, b), (r, b), (255, 255, 0), 2)
                 if (
                         self.current_traffic_light_state == 'red' and
-                        self.line and
-                        self.line.is_car_touch_line(l, t, r, processed_frame.shape)
+                        self.line.is_car_touch_line(l, b, r, processed_frame.shape)
                     ):
-                    violation_box = (l, t, r, b)
-                    car_crop = crop_car_from_frame(frame, violation_box) 
-                    license_plate_number = extract_license_plate_number(car_crop)
+                    car = Car((l, t, r, b), processed_frame)
+                    license_plate_number = car.extract_license_plate_number()
 
-                    if license_plate_number not in self.last_violations.keys():
-                        self.last_violations[license_plate_number] = license_plate_number
-                    else:
+                    if license_plate_number in self.last_violations:
                         continue
+                    self.last_violations[license_plate_number] = license_plate_number
 
                     violation = {
                         "license_plate_number": license_plate_number,
@@ -161,27 +154,3 @@ class FrameBatchProcessor:
 
 
 
-def crop_car_from_frame(frame, position, frame_resized_shape=(640, 480)):
-    l, t, r, b = position
-    resized_w, resized_h = frame_resized_shape
-    orig_h, orig_w = frame.shape[:2]
-
-    # Scale from resized to original
-    scale_x = orig_w / resized_w
-    scale_y = orig_h / resized_h
-
-    # Convert to original coordinates
-    orig_l = int(l * scale_x)
-    orig_t = int(t * scale_y)
-    orig_r = int(r * scale_x)
-    orig_b = int(b * scale_y)
-
-    # Ensure coordinates are within frame bounds
-    orig_l = max(0, orig_l)
-    orig_t = max(0, orig_t)
-    orig_r = min(orig_w, orig_r)
-    orig_b = min(orig_h, orig_b)
-
-    # Crop and return the car image
-    car_crop = frame[orig_t:orig_b, orig_l:orig_r].copy()
-    return car_crop

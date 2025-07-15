@@ -3,7 +3,6 @@ import pickle
 import threading
 import struct
 import cv2
-from collections import defaultdict
 from violation_detections import FrameBatchProcessor  # Assuming you have this module
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
@@ -13,7 +12,8 @@ from Crypto.Random import get_random_bytes
 PORT = 9999
 
 # Key variable
-AES_KEY = b"this_is_a_32_byte_super_secret_key!!"
+AES_KEY = b"this_is_a_super_secret_key_32!!!"
+
 
 def recv_exact(conn, length):
     """Ensure exactly 'length' bytes are read from the TCP stream"""
